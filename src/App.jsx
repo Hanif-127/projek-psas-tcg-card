@@ -257,8 +257,13 @@ function HomePage() {
 
             <motion.div layout className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
               <AnimatePresence mode="popLayout">
-                {filteredCards.map((card) => (
-                  <CardTile key={card.id} card={card} isFound={foundSet.has(card.id)} />
+                {filteredCards.map((card, index) => (
+                  <CardTile
+                    key={card.id}
+                    card={card}
+                    isFound={foundSet.has(card.id)}
+                    priority={index < 8}
+                  />
                 ))}
               </AnimatePresence>
             </motion.div>
@@ -330,7 +335,7 @@ function ProgressCard({ progress, found, total }) {
   );
 }
 
-function CardTile({ card, isFound }) {
+function CardTile({ card, isFound, priority = false }) {
   return (
     <motion.article
       layout
@@ -356,7 +361,8 @@ function CardTile({ card, isFound }) {
             src={cardImage(card, "thumbs")}
             alt={`Kartu ${card.name}`}
             className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.035]"
-            loading="lazy"
+            decoding="async"
+            loading={priority ? "eager" : "lazy"}
           />
           {isFound && (
             <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-leaf px-2 py-1 text-[11px] font-black text-white">
