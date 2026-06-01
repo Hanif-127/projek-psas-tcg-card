@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import clsx from "clsx";
@@ -7,25 +7,65 @@ import {
   Award,
   BookOpen,
   Check,
+  CircleHelp,
   Languages,
   Landmark,
+  LogIn,
+  LogOut,
   Palette,
   Search,
   Shield,
   Sparkles,
   Swords,
 } from "lucide-react";
+import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
+import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 import { SUBJECTS, WARNING_GUIDANCE, cards } from "./data";
+import { auth, db, googleProvider, isFirebaseConfigured } from "./firebase";
 
-const foundKey = "tapWayangReactFound";
+const legacyFoundKey = "tapWayangReactFound";
+const ownedKey = "tapWayangReactOwned";
+const exploredKey = "tapWayangReactExplored";
 const quizKey = "tapWayangReactQuiz";
 const cardById = new Map(cards.map((card) => [card.id, card]));
+const nfcTokenByCard = {
+  abimanyu: "tw-a8m4q2",
+  arjuna: "tw-r7j9x1",
+  bima: "tw-b5k2n8",
+  drestadyumna: "tw-d4s8p6",
+  gatotkaca: "tw-g9t3c1",
+  krishna: "tw-k6r2s7",
+  nakula: "tw-n2k8l4",
+  "prabu-drupada": "tw-p3d7r5",
+  sadewa: "tw-s4d9w2",
+  seta: "tw-s8t1a6",
+  srikandi: "tw-sr5k3d",
+  yudhistira: "tw-y7d2h9",
+  aswatama: "tw-a3w8t5",
+  burisrawa: "tw-b9r1s4",
+  citraksa: "tw-c5t7k2",
+  drona: "tw-d8r3n6",
+  dursasana: "tw-d6s2s9",
+  jayadrata: "tw-j4y8d1",
+  kartamarma: "tw-k7m5r3",
+  "prabu-salya": "tw-p9s4l6",
+  bisma: "tw-b2s8m5",
+  duryudana: "tw-d7y3d8",
+  karna: "tw-k4r9n2",
+  sengkuni: "tw-s6g1k7",
+};
+const cardByToken = new Map(
+  Object.entries(nfcTokenByCard)
+    .map(([id, token]) => [token, cardById.get(id)])
+    .filter(([, card]) => Boolean(card))
+);
 
 const filters = [
   { id: "all", label: "Semua" },
   { id: "Tokoh Baik", label: "Tokoh Baik" },
   { id: "Tokoh Jahat", label: "Tokoh Jahat" },
-  { id: "found", label: "Dibuka" },
+  { id: "owned", label: "Koleksi Fisik" },
+  { id: "explored", label: "Dikepoin" },
 ];
 
 const subjectIcons = {
@@ -47,18 +87,145 @@ function unique(list) {
   return [...new Set(list)];
 }
 
-function markFound(id) {
-  const found = readJson(foundKey, []);
-  if (!found.includes(id)) {
-    localStorage.setItem(foundKey, JSON.stringify([...found, id]));
-  }
+function readLocalProgress() {
+  const legacyFound = readJson(legacyFoundKey, []);
+  return {
+    ownedCards: unique(readJson(ownedKey, [])),
+    exploredCards: unique([...readJson(exploredKey, []), ...legacyFound]),
+    quizScores: readJson(quizKey, {}),
+  };
 }
 
-function saveQuizScore(id, score) {
-  const scores = readJson(quizKey, {});
-  scores[id] = Math.max(scores[id] || 0, score);
-  localStorage.setItem(quizKey, JSON.stringify(scores));
+function writeLocalProgress(progress) {
+  localStorage.setItem(ownedKey, JSON.stringify(unique(progress.ownedCards || [])));
+  localStorage.setItem(exploredKey, JSON.stringify(unique(progress.exploredCards || [])));
+  localStorage.setItem(quizKey, JSON.stringify(progress.quizScores || {}));
 }
+
+function mergeProgress(localProgress, remoteProgress = {}) {
+  return {
+    ownedCards: unique([...(localProgress.ownedCards || []), ...(remoteProgress.ownedCards || [])]),
+    exploredCards: unique([
+      ...(localProgress.exploredCards || []),
+      ...(remoteProgress.exploredCards || []),
+    ]),
+    quizScores: {
+      ...(remoteProgress.quizScores || {}),
+      ...(localProgress.quizScores || {}),
+    },
+  };
+}
+
+function useAuthState() {
+  const [user, setUser] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(!isFirebaseConfigured);
+
+  useEffect(() => {
+    if (!auth) return undefined;
+    return onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser);
+      setIsAuthReady(true);
+    });
+  }, []);
+
+  const login = useCallback(async () => {
+    if (!auth || !googleProvider) return;
+    await signInWithPopup(auth, googleProvider);
+  }, []);
+
+  const logout = useCallback(async () => {
+    if (!auth) return;
+    await signOut(auth);
+  }, []);
+
+  return { user, isAuthReady, login, logout, canLogin: isFirebaseConfigured };
+}
+
+function useProgressState(user) {
+  const [progress, setProgress] = useState(() => readLocalProgress());
+  const userDocRef = user && db ? doc(db, "userProgress", user.uid) : null;
+
+  const persist = useCallback(
+    async (nextProgress) => {
+      writeLocalProgress(nextProgress);
+      if (userDocRef) {
+        await setDoc(
+          userDocRef,
+          {
+            ...nextProgress,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+    },
+    [userDocRef]
+  );
+
+  useEffect(() => {
+    let isActive = true;
+    async function syncRemoteProgress() {
+      if (!userDocRef) return;
+      const snapshot = await getDoc(userDocRef);
+      if (!isActive) return;
+      const merged = mergeProgress(readLocalProgress(), snapshot.exists() ? snapshot.data() : {});
+      setProgress(merged);
+      await persist(merged);
+    }
+    syncRemoteProgress().catch(() => {});
+    return () => {
+      isActive = false;
+    };
+  }, [persist, userDocRef]);
+
+  const updateProgress = useCallback(
+    (updater) => {
+      setProgress((current) => {
+        const nextProgress = updater(current);
+        persist(nextProgress).catch(() => {});
+        return nextProgress;
+      });
+    },
+    [persist]
+  );
+
+  const markExplored = useCallback(
+    (id) => {
+      updateProgress((current) => ({
+        ...current,
+        exploredCards: unique([...(current.exploredCards || []), id]),
+      }));
+    },
+    [updateProgress]
+  );
+
+  const markOwned = useCallback(
+    (id) => {
+      updateProgress((current) => ({
+        ...current,
+        ownedCards: unique([...(current.ownedCards || []), id]),
+        exploredCards: unique([...(current.exploredCards || []), id]),
+      }));
+    },
+    [updateProgress]
+  );
+
+  const saveScore = useCallback(
+    (id, score) => {
+      updateProgress((current) => ({
+        ...current,
+        quizScores: {
+          ...(current.quizScores || {}),
+          [id]: Math.max(score, current.quizScores?.[id] || 0),
+        },
+      }));
+    },
+    [updateProgress]
+  );
+
+  return { progress, markExplored, markOwned, saveScore };
+}
+
 
 function cardImage(card, type = "cards") {
   return `/assets/${type}/${card.image}`;
@@ -144,7 +311,7 @@ function quizFor(card) {
   ];
 }
 
-function Layout({ children }) {
+function Layout({ children, authState }) {
   return (
     <div className="min-h-screen text-ink">
       <header className="sticky top-0 z-40 border-b border-white/10 bg-zinc-950/95 text-paper backdrop-blur">
@@ -172,6 +339,7 @@ function Layout({ children }) {
             >
               Koleksi
             </NavLink>
+            <AuthButton authState={authState} />
           </nav>
         </div>
       </header>
@@ -180,13 +348,57 @@ function Layout({ children }) {
   );
 }
 
-function HomePage() {
+function AuthButton({ authState }) {
+  if (!authState?.canLogin) {
+    return (
+      <span
+        className="hidden rounded-lg border border-white/15 px-3 py-2 text-xs font-bold text-paper/55 md:inline-flex"
+        title="Aktifkan Firebase untuk login Google."
+      >
+        Login belum aktif
+      </span>
+    );
+  }
+
+  if (!authState.isAuthReady) {
+    return (
+      <span className="rounded-lg border border-white/15 px-3 py-2 text-xs font-bold text-paper/70">
+        Memuat...
+      </span>
+    );
+  }
+
+  if (authState.user) {
+    return (
+      <button
+        onClick={authState.logout}
+        className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/15 px-3 text-sm font-bold text-paper transition hover:bg-white/10"
+      >
+        <LogOut size={16} />
+        <span className="hidden sm:inline">{authState.user.displayName?.split(" ")[0] || "Logout"}</span>
+      </button>
+    );
+  }
+
+  return (
+    <button
+      onClick={authState.login}
+      className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/15 px-3 text-sm font-bold text-paper transition hover:bg-white/10"
+    >
+      <LogIn size={16} />
+      <span className="hidden sm:inline">Login Google</span>
+    </button>
+  );
+}
+
+function HomePage({ progress, authState }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
-  const found = readJson(foundKey, []);
-  const foundSet = new Set(found);
-  const scores = readJson(quizKey, {});
-  const progress = Math.round((found.length / cards.length) * 100);
+  const ownedSet = new Set(progress.ownedCards || []);
+  const exploredSet = new Set(progress.exploredCards || []);
+  const scores = progress.quizScores || {};
+  const ownedProgress = Math.round(((progress.ownedCards?.length || 0) / cards.length) * 100);
+  const exploredProgress = Math.round(((progress.exploredCards?.length || 0) / cards.length) * 100);
 
   const filteredCards = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -194,16 +406,17 @@ function HomePage() {
       const matchesFilter =
         filter === "all" ||
         card.faction === filter ||
-        (filter === "found" && foundSet.has(card.id));
+        (filter === "owned" && ownedSet.has(card.id)) ||
+        (filter === "explored" && exploredSet.has(card.id));
       const haystack = `${card.name} ${card.faction} ${card.role} ${card.origin}`.toLowerCase();
       return matchesFilter && haystack.includes(normalized);
     });
-  }, [filter, foundSet, query]);
+  }, [exploredSet, filter, ownedSet, query]);
 
   return (
-    <Layout>
+    <Layout authState={authState}>
       <main className="mx-auto w-[min(1180px,calc(100%-24px))] py-6 md:py-8">
-        <section className="grid gap-4 rounded-lg border border-ink/10 bg-white/70 p-4 shadow-soft backdrop-blur md:grid-cols-[minmax(0,1fr)_auto] md:p-5">
+        <section className="grid gap-4 rounded-lg border border-ink/10 bg-white/70 p-4 shadow-soft backdrop-blur lg:grid-cols-[minmax(0,1fr)_auto] md:p-5">
           <div className="space-y-3">
             <span className="inline-flex items-center gap-2 rounded-full border border-teak/20 bg-teak/10 px-3 py-1 text-xs font-extrabold text-teak">
               <Sparkles size={14} /> PSAS Budaya Digital
@@ -218,7 +431,24 @@ function HomePage() {
               </p>
             </div>
           </div>
-          <ProgressCard progress={progress} found={found.length} total={cards.length} />
+          <div className="grid gap-3 sm:grid-cols-2 lg:w-[520px]">
+            <ProgressCard
+              color="#176b68"
+              label="Koleksi Fisik"
+              progress={ownedProgress}
+              count={progress.ownedCards?.length || 0}
+              total={cards.length}
+              caption="Hanya bertambah dari tap kartu NFC fisik."
+            />
+            <ProgressCard
+              color="#c99a2d"
+              label="Eksplorasi Web"
+              progress={exploredProgress}
+              count={progress.exploredCards?.length || 0}
+              total={cards.length}
+              caption="Bertambah dari buka dan kepoin kartu di web."
+            />
+          </div>
         </section>
 
         <section className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
@@ -261,7 +491,8 @@ function HomePage() {
                   <CardTile
                     key={card.id}
                     card={card}
-                    isFound={foundSet.has(card.id)}
+                    isOwned={ownedSet.has(card.id)}
+                    isExplored={exploredSet.has(card.id)}
                     priority={index < 8}
                   />
                 ))}
@@ -275,11 +506,14 @@ function HomePage() {
           </div>
 
           <aside className="space-y-4 lg:sticky lg:top-24 lg:self-start">
+            <LoginPanel authState={authState} />
             <InfoPanel
               title="Ringkasan"
               rows={[
                 ["Tokoh Baik", cards.filter((card) => card.faction === "Tokoh Baik").length],
                 ["Tokoh Jahat", cards.filter((card) => card.faction === "Tokoh Jahat").length],
+                ["Koleksi fisik", progress.ownedCards?.length || 0],
+                ["Dikepoin web", progress.exploredCards?.length || 0],
                 ["Quiz selesai", Object.keys(scores).length],
               ]}
             />
@@ -313,29 +547,70 @@ function HomePage() {
   );
 }
 
-function ProgressCard({ progress, found, total }) {
+function LoginPanel({ authState }) {
+  return (
+    <section className="rounded-lg border border-ink/10 bg-white/70 p-4 shadow-sm">
+      <h2 className="flex items-center gap-2 font-black">
+        <CircleHelp size={18} className="text-teak" /> Akun Koleksi
+      </h2>
+      {authState?.canLogin ? (
+        authState.user ? (
+          <div className="mt-3 flex items-center gap-3">
+            {authState.user.photoURL && (
+              <img
+                src={authState.user.photoURL}
+                alt=""
+                className="h-10 w-10 rounded-full border border-ink/10"
+              />
+            )}
+            <div className="min-w-0">
+              <p className="truncate text-sm font-extrabold">{authState.user.displayName}</p>
+              <p className="truncate text-xs text-muted">Progress disimpan ke akun Google.</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <p className="mt-2 text-sm leading-5 text-muted">
+              Login Google membuat progress koleksi bisa ikut terbawa saat pindah perangkat.
+            </p>
+            <button
+              onClick={authState.login}
+              className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-zinc-950 px-4 text-sm font-bold text-white"
+            >
+              <LogIn size={16} /> Login Google
+            </button>
+          </>
+        )
+      ) : (
+        <p className="mt-2 text-sm leading-5 text-muted">
+          Login Google sudah disiapkan, tapi belum aktif sampai Firebase config dimasukkan di Vercel.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function ProgressCard({ progress, count, total, label, caption, color }) {
   return (
     <div className="flex items-center gap-4 rounded-lg border border-ink/10 bg-white p-4">
       <div
-        className="grid h-24 w-24 place-items-center rounded-full"
-        style={{ background: `conic-gradient(#176b68 ${progress}%, rgba(33,29,25,.1) 0)` }}
+        className="grid h-24 w-24 shrink-0 place-items-center rounded-full"
+        style={{ background: `conic-gradient(${color} ${progress}%, rgba(33,29,25,.1) 0)` }}
       >
         <div className="grid h-20 w-20 place-items-center rounded-full bg-paper text-center">
-          <strong className="text-xl font-black">{found}/{total}</strong>
-          <span className="text-xs font-bold text-muted">dibuka</span>
+          <strong className="text-xl font-black">{count}/{total}</strong>
+          <span className="text-xs font-bold text-muted">{progress}%</span>
         </div>
       </div>
       <div>
-        <p className="text-sm font-extrabold text-ink">Progress koleksi</p>
-        <p className="mt-1 max-w-44 text-sm leading-5 text-muted">
-          Buka kartu dari hasil tap NFC atau dari galeri.
-        </p>
+        <p className="text-sm font-extrabold text-ink">{label}</p>
+        <p className="mt-1 max-w-44 text-sm leading-5 text-muted">{caption}</p>
       </div>
     </div>
   );
 }
 
-function CardTile({ card, isFound, priority = false }) {
+function CardTile({ card, isOwned, isExplored, priority = false }) {
   return (
     <motion.article
       layout
@@ -364,9 +639,14 @@ function CardTile({ card, isFound, priority = false }) {
             decoding="async"
             loading={priority ? "eager" : "lazy"}
           />
-          {isFound && (
-            <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-leaf px-2 py-1 text-[11px] font-black text-white">
-              <Check size={12} /> Dibuka
+          {(isOwned || isExplored) && (
+            <span
+              className={clsx(
+                "absolute right-2 top-2 inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-black text-white",
+                isOwned ? "bg-leaf" : "bg-gold text-ink"
+              )}
+            >
+              <Check size={12} /> {isOwned ? "Punya" : "Dikepoin"}
             </span>
           )}
         </div>
@@ -400,15 +680,20 @@ function InfoPanel({ title, rows }) {
   );
 }
 
-function DetailPage() {
+function DetailPage({ authState, markExplored, markOwned, saveScore, source = "web", scannedCard }) {
   const { id } = useParams();
   const navigate = useNavigate();
-  const card = cardById.get(id);
+  const card = scannedCard || cardById.get(id);
   const [tab, setTab] = useState("cerita");
 
   useEffect(() => {
-    if (card) markFound(card.id);
-  }, [card]);
+    if (!card) return;
+    if (source === "tap") {
+      markOwned(card.id);
+    } else {
+      markExplored(card.id);
+    }
+  }, [card, markExplored, markOwned, source]);
 
   if (!card) return <NotFound id={id} />;
 
@@ -420,8 +705,13 @@ function DetailPage() {
   ];
 
   return (
-    <Layout>
+    <Layout authState={authState}>
       <main className="mx-auto w-[min(1180px,calc(100%-24px))] py-6 md:py-8">
+        {source === "tap" && (
+          <div className="mb-4 rounded-lg border border-teak/20 bg-teak/10 p-4 text-sm font-bold text-teak">
+            Tap NFC terdeteksi. Kartu ini masuk ke progress Koleksi Fisik.
+          </div>
+        )}
         <section className="grid gap-5 rounded-lg border border-ink/10 bg-white/70 p-4 shadow-soft md:grid-cols-[minmax(250px,390px)_minmax(0,1fr)] md:p-5">
           <aside className="md:sticky md:top-24 md:self-start">
             <motion.div
@@ -491,13 +781,29 @@ function DetailPage() {
                 {tab === "cerita" && <StoryPanel card={card} />}
                 {tab === "teladan" && <ValuePanel card={card} />}
                 {tab === "mapel" && <SubjectPanel card={card} />}
-                {tab === "quiz" && <QuizPanel card={card} />}
+                {tab === "quiz" && <QuizPanel card={card} saveScore={saveScore} />}
               </motion.div>
             </AnimatePresence>
           </article>
         </section>
       </main>
     </Layout>
+  );
+}
+
+function TapPage({ authState, markExplored, markOwned, saveScore }) {
+  const { token } = useParams();
+  const card = cardByToken.get(token);
+  if (!card) return <NotFound id={token} authState={authState} />;
+  return (
+    <DetailPage
+      authState={authState}
+      markExplored={markExplored}
+      markOwned={markOwned}
+      saveScore={saveScore}
+      source="tap"
+      scannedCard={card}
+    />
   );
 }
 
@@ -627,14 +933,14 @@ function SubjectPanel({ card }) {
   );
 }
 
-function QuizPanel({ card }) {
+function QuizPanel({ card, saveScore }) {
   const questions = useMemo(() => quizFor(card), [card]);
   const [answers, setAnswers] = useState({});
   const correct = Object.values(answers).filter(Boolean).length;
 
   useEffect(() => {
-    saveQuizScore(card.id, correct);
-  }, [card.id, correct]);
+    saveScore(card.id, correct);
+  }, [card.id, correct, saveScore]);
 
   return (
     <div className="grid gap-4">
@@ -685,9 +991,9 @@ function QuizPanel({ card }) {
   );
 }
 
-function NotFound({ id }) {
+function NotFound({ id, authState }) {
   return (
-    <Layout>
+    <Layout authState={authState}>
       <main className="mx-auto w-[min(1180px,calc(100%-24px))] py-8">
         <div className="rounded-lg border border-dashed border-ink/15 bg-white/70 p-6">
           <h1 className="text-xl font-black">Kartu tidak ditemukan</h1>
@@ -705,11 +1011,38 @@ function NotFound({ id }) {
 }
 
 export default function App() {
+  const authState = useAuthState();
+  const progressState = useProgressState(authState.user);
+
   return (
     <Routes>
-      <Route path="/" element={<HomePage />} />
-      <Route path="/k/:id" element={<DetailPage />} />
-      <Route path="*" element={<NotFound id="unknown" />} />
+      <Route
+        path="/"
+        element={<HomePage progress={progressState.progress} authState={authState} />}
+      />
+      <Route
+        path="/k/:id"
+        element={
+          <DetailPage
+            authState={authState}
+            markExplored={progressState.markExplored}
+            markOwned={progressState.markOwned}
+            saveScore={progressState.saveScore}
+          />
+        }
+      />
+      <Route
+        path="/t/:token"
+        element={
+          <TapPage
+            authState={authState}
+            markExplored={progressState.markExplored}
+            markOwned={progressState.markOwned}
+            saveScore={progressState.saveScore}
+          />
+        }
+      />
+      <Route path="*" element={<NotFound id="unknown" authState={authState} />} />
     </Routes>
   );
 }

@@ -8,6 +8,7 @@ Versi ini dibuat ulang dengan:
 - Framer Motion
 - lucide-react
 - React Router
+- Firebase Auth + Firestore opsional untuk login Google
 
 ## Yang Perlu Disiapkan
 
@@ -38,16 +39,52 @@ Cek lagi narasi tokoh, piwulang Jawa, dan bagian 4 mapel utama sebelum dinilai g
 
 5. Keputusan link rahasia
 
-Saat ini route masih mudah dibaca:
+Route lihat kartu dari web masih mudah dibaca:
 
 ```txt
 /k/abimanyu
 ```
 
-Kalau link NFC ingin lebih rahasia, ganti menjadi kode acak sebelum stiker ditulis:
+Route NFC untuk koleksi fisik sudah dipisah menjadi kode:
 
 ```txt
-/k/a7q2m9
+/t/tw-a8m4q2
+```
+
+Klik `/k/...` menambah progress Eksplorasi Web. Tap `/t/...` menambah progress Koleksi Fisik.
+
+## Login Google
+
+Login Google sudah disiapkan, tetapi baru aktif setelah Firebase config dimasukkan.
+
+1. Buat project Firebase.
+2. Aktifkan Authentication > Sign-in method > Google.
+3. Buat Firestore Database.
+4. Tambahkan domain Vercel di Authorized domains pada Firebase Auth.
+5. Isi environment variables di Vercel sesuai `.env.example`.
+
+Nama environment variable:
+
+```txt
+VITE_FIREBASE_API_KEY
+VITE_FIREBASE_AUTH_DOMAIN
+VITE_FIREBASE_PROJECT_ID
+VITE_FIREBASE_STORAGE_BUCKET
+VITE_FIREBASE_MESSAGING_SENDER_ID
+VITE_FIREBASE_APP_ID
+```
+
+Contoh Firestore rules sederhana:
+
+```txt
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /userProgress/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
 ```
 
 ## Jalankan Lokal
