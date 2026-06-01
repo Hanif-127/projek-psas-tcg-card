@@ -27,6 +27,7 @@ const legacyFoundKey = "tapWayangReactFound";
 const ownedKey = "tapWayangReactOwned";
 const exploredKey = "tapWayangReactExplored";
 const quizKey = "tapWayangReactQuiz";
+const accountProgressCachePrefix = "tapWayangReactAccountProgress";
 const cardById = new Map(cards.map((card) => [card.id, card]));
 const nfcTokenByCard = {
   abimanyu: "tw-a8m4q2",
@@ -87,33 +88,48 @@ function unique(list) {
   return [...new Set(list)];
 }
 
-function readLocalProgress() {
-  const legacyFound = readJson(legacyFoundKey, []);
+function emptyProgress() {
   return {
-    ownedCards: unique(readJson(ownedKey, [])),
+    ownedCards: [],
+    exploredCards: [],
+    quizScores: {},
+  };
+}
+
+function normalizeProgress(progress = {}) {
+  return {
+    ownedCards: unique(progress.ownedCards || []),
+    exploredCards: unique(progress.exploredCards || []),
+    quizScores: progress.quizScores || {},
+  };
+}
+
+function readAnonymousProgress() {
+  const legacyFound = readJson(legacyFoundKey, []);
+  return normalizeProgress({
+    ownedCards: readJson(ownedKey, []),
     exploredCards: unique([...readJson(exploredKey, []), ...legacyFound]),
     quizScores: readJson(quizKey, {}),
-  };
+  });
 }
 
-function writeLocalProgress(progress) {
-  localStorage.setItem(ownedKey, JSON.stringify(unique(progress.ownedCards || [])));
-  localStorage.setItem(exploredKey, JSON.stringify(unique(progress.exploredCards || [])));
-  localStorage.setItem(quizKey, JSON.stringify(progress.quizScores || {}));
+function writeAnonymousProgress(progress) {
+  const normalized = normalizeProgress(progress);
+  localStorage.setItem(ownedKey, JSON.stringify(normalized.ownedCards));
+  localStorage.setItem(exploredKey, JSON.stringify(normalized.exploredCards));
+  localStorage.setItem(quizKey, JSON.stringify(normalized.quizScores));
 }
 
-function mergeProgress(localProgress, remoteProgress = {}) {
-  return {
-    ownedCards: unique([...(localProgress.ownedCards || []), ...(remoteProgress.ownedCards || [])]),
-    exploredCards: unique([
-      ...(localProgress.exploredCards || []),
-      ...(remoteProgress.exploredCards || []),
-    ]),
-    quizScores: {
-      ...(remoteProgress.quizScores || {}),
-      ...(localProgress.quizScores || {}),
-    },
-  };
+function accountProgressCacheKey(uid) {
+  return `${accountProgressCachePrefix}:${uid}`;
+}
+
+function readCachedAccountProgress(uid) {
+  return normalizeProgress(readJson(accountProgressCacheKey(uid), emptyProgress()));
+}
+
+function writeCachedAccountProgress(uid, progress) {
+  localStorage.setItem(accountProgressCacheKey(uid), JSON.stringify(normalizeProgress(progress)));
 }
 
 function useAuthState() {
@@ -167,51 +183,82 @@ function authErrorMessage(error) {
   return error?.message || "Login Google gagal. Coba ulangi beberapa saat lagi.";
 }
 
-function useProgressState(user) {
-  const [progress, setProgress] = useState(() => readLocalProgress());
+function useProgressState(user, isAuthReady) {
+  const [progress, setProgress] = useState(() => readAnonymousProgress());
+  const [isProgressLoading, setIsProgressLoading] = useState(!isAuthReady);
+  const uid = user?.uid || "";
   const userDocRef = useMemo(
-    () => (user && db ? doc(db, "userProgress", user.uid) : null),
-    [user]
+    () => (uid && db ? doc(db, "userProgress", uid) : null),
+    [uid]
   );
 
   const persist = useCallback(
     async (nextProgress) => {
-      writeLocalProgress(nextProgress);
-      if (userDocRef) {
+      const normalized = normalizeProgress(nextProgress);
+      if (uid && userDocRef) {
+        writeCachedAccountProgress(uid, normalized);
         await setDoc(
           userDocRef,
           {
-            ...nextProgress,
+            ...normalized,
             updatedAt: serverTimestamp(),
           },
           { merge: true }
         );
+      } else {
+        writeAnonymousProgress(normalized);
       }
     },
-    [userDocRef]
+    [uid, userDocRef]
   );
 
   useEffect(() => {
     let isActive = true;
-    async function syncRemoteProgress() {
-      if (!userDocRef) return;
-      const snapshot = await getDoc(userDocRef);
-      if (!isActive) return;
-      const merged = mergeProgress(readLocalProgress(), snapshot.exists() ? snapshot.data() : {});
-      setProgress(merged);
-      await persist(merged);
+    async function loadProgress() {
+      if (!isAuthReady) {
+        setIsProgressLoading(true);
+        return;
+      }
+
+      if (!uid || !userDocRef) {
+        setProgress(readAnonymousProgress());
+        setIsProgressLoading(false);
+        return;
+      }
+
+      setIsProgressLoading(true);
+      setProgress(readCachedAccountProgress(uid));
+
+      try {
+        const snapshot = await getDoc(userDocRef);
+        if (!isActive) return;
+        const remoteProgress = snapshot.exists()
+          ? normalizeProgress(snapshot.data())
+          : emptyProgress();
+        setProgress(remoteProgress);
+        writeCachedAccountProgress(uid, remoteProgress);
+      } catch {
+        if (isActive) {
+          setProgress(readCachedAccountProgress(uid));
+        }
+      } finally {
+        if (isActive) {
+          setIsProgressLoading(false);
+        }
+      }
     }
-    syncRemoteProgress().catch(() => {});
+    loadProgress();
     return () => {
       isActive = false;
     };
-  }, [persist, userDocRef]);
+  }, [isAuthReady, uid, userDocRef]);
 
   const updateProgress = useCallback(
     (updater) => {
       setProgress((current) => {
-        const nextProgress = updater(current);
-        if (Object.is(nextProgress, current)) return current;
+        const rawNextProgress = updater(current);
+        if (Object.is(rawNextProgress, current)) return current;
+        const nextProgress = normalizeProgress(rawNextProgress);
         persist(nextProgress).catch(() => {});
         return nextProgress;
       });
@@ -269,7 +316,14 @@ function useProgressState(user) {
     [updateProgress]
   );
 
-  return { progress, markExplored, markOwned, saveScore };
+  return {
+    progress,
+    isProgressLoading,
+    isProgressReady: isAuthReady && !isProgressLoading,
+    markExplored,
+    markOwned,
+    saveScore,
+  };
 }
 
 
@@ -440,7 +494,8 @@ function AuthButton({ authState }) {
               {initial}
             </span>
           )}
-          <span className="max-w-20 truncate sm:max-w-28">{firstName}</span>
+          <span className="max-w-16 truncate sm:max-w-28">{firstName}</span>
+          <span className="hidden text-paper/70 sm:inline">Keluar</span>
           <LogOut size={15} className="text-paper/70" />
         </button>
       </div>
@@ -465,7 +520,7 @@ function AuthButton({ authState }) {
   );
 }
 
-function HomePage({ progress, authState }) {
+function HomePage({ progress, authState, isProgressLoading }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const ownedSet = new Set(progress.ownedCards || []);
@@ -513,6 +568,7 @@ function HomePage({ progress, authState }) {
               count={progress.ownedCards?.length || 0}
               total={cards.length}
               caption="Hanya bertambah dari tap kartu NFC fisik."
+              isLoading={isProgressLoading}
             />
             <ProgressCard
               color="#c99a2d"
@@ -521,6 +577,7 @@ function HomePage({ progress, authState }) {
               count={progress.exploredCards?.length || 0}
               total={cards.length}
               caption="Bertambah dari buka dan kepoin kartu di web."
+              isLoading={isProgressLoading}
             />
           </div>
         </section>
@@ -580,7 +637,7 @@ function HomePage({ progress, authState }) {
           </div>
 
           <aside className="space-y-4 lg:sticky lg:top-24 lg:self-start">
-            <LoginPanel authState={authState} />
+            <LoginPanel authState={authState} isProgressLoading={isProgressLoading} />
             <InfoPanel
               title="Ringkasan"
               rows={[
@@ -621,7 +678,7 @@ function HomePage({ progress, authState }) {
   );
 }
 
-function LoginPanel({ authState }) {
+function LoginPanel({ authState, isProgressLoading }) {
   return (
     <section className="rounded-lg border border-ink/10 bg-white/70 p-4 shadow-sm">
       <h2 className="flex items-center gap-2 font-black">
@@ -639,7 +696,9 @@ function LoginPanel({ authState }) {
             )}
             <div className="min-w-0">
               <p className="truncate text-sm font-extrabold">{authState.user.displayName}</p>
-              <p className="truncate text-xs text-muted">Progress disimpan ke akun Google.</p>
+              <p className="truncate text-xs text-muted">
+                {isProgressLoading ? "Memuat progress akun..." : "Progress disimpan ke akun Google."}
+              </p>
             </div>
           </div>
         ) : (
@@ -669,7 +728,7 @@ function LoginPanel({ authState }) {
   );
 }
 
-function ProgressCard({ progress, count, total, label, caption, color }) {
+function ProgressCard({ progress, count, total, label, caption, color, isLoading = false }) {
   return (
     <div className="flex items-center gap-4 rounded-lg border border-ink/10 bg-white p-4">
       <div
@@ -683,7 +742,9 @@ function ProgressCard({ progress, count, total, label, caption, color }) {
       </div>
       <div>
         <p className="text-sm font-extrabold text-ink">{label}</p>
-        <p className="mt-1 max-w-44 text-sm leading-5 text-muted">{caption}</p>
+        <p className="mt-1 max-w-44 text-sm leading-5 text-muted">
+          {isLoading ? "Sinkron akun..." : caption}
+        </p>
       </div>
     </div>
   );
@@ -759,19 +820,27 @@ function InfoPanel({ title, rows }) {
   );
 }
 
-function DetailPage({ authState, markExplored, markOwned, saveScore, source = "web", scannedCard }) {
+function DetailPage({
+  authState,
+  isProgressReady,
+  markExplored,
+  markOwned,
+  saveScore,
+  source = "web",
+  scannedCard,
+}) {
   const { id } = useParams();
   const card = scannedCard || cardById.get(id);
   const [tab, setTab] = useState("cerita");
 
   useEffect(() => {
-    if (!card) return;
+    if (!card || !isProgressReady) return;
     if (source === "tap") {
       markOwned(card.id);
     } else {
       markExplored(card.id);
     }
-  }, [card, markExplored, markOwned, source]);
+  }, [card, isProgressReady, markExplored, markOwned, source]);
 
   if (!card) return <NotFound id={id} authState={authState} />;
 
@@ -790,6 +859,12 @@ function DetailPage({ authState, markExplored, markOwned, saveScore, source = "w
             Tap NFC terdeteksi. Kartu ini masuk ke progress Koleksi Fisik.
           </div>
         )}
+        <Link
+          to="/"
+          className="mb-4 inline-flex h-11 items-center gap-2 rounded-lg border border-ink/10 bg-white px-4 text-sm font-black text-muted shadow-sm transition hover:border-teak/30 hover:text-ink md:hidden"
+        >
+          <ArrowLeft size={18} /> Kembali ke koleksi
+        </Link>
         <section className="grid gap-5 rounded-lg border border-ink/10 bg-white/70 p-4 shadow-soft md:grid-cols-[minmax(250px,390px)_minmax(0,1fr)] md:p-5">
           <aside className="md:sticky md:top-24 md:self-start">
             <motion.div
@@ -866,7 +941,7 @@ function DetailPage({ authState, markExplored, markOwned, saveScore, source = "w
         </section>
         <Link
           to="/"
-          className="fixed inset-x-4 bottom-4 z-50 inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-zinc-950 px-4 text-sm font-black text-white shadow-soft md:hidden"
+          className="fixed inset-x-4 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-50 inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-zinc-950 px-4 text-sm font-black text-white shadow-soft md:hidden"
         >
           <ArrowLeft size={18} /> Kembali ke koleksi
         </Link>
@@ -875,13 +950,14 @@ function DetailPage({ authState, markExplored, markOwned, saveScore, source = "w
   );
 }
 
-function TapPage({ authState, markExplored, markOwned, saveScore }) {
+function TapPage({ authState, isProgressReady, markExplored, markOwned, saveScore }) {
   const { token } = useParams();
   const card = cardByToken.get(token);
   if (!card) return <NotFound id={token} authState={authState} />;
   return (
     <DetailPage
       authState={authState}
+      isProgressReady={isProgressReady}
       markExplored={markExplored}
       markOwned={markOwned}
       saveScore={saveScore}
@@ -1096,19 +1172,26 @@ function NotFound({ id, authState }) {
 
 export default function App() {
   const authState = useAuthState();
-  const progressState = useProgressState(authState.user);
+  const progressState = useProgressState(authState.user, authState.isAuthReady);
 
   return (
     <Routes>
       <Route
         path="/"
-        element={<HomePage progress={progressState.progress} authState={authState} />}
+        element={
+          <HomePage
+            progress={progressState.progress}
+            authState={authState}
+            isProgressLoading={progressState.isProgressLoading}
+          />
+        }
       />
       <Route
         path="/k/:id"
         element={
           <DetailPage
             authState={authState}
+            isProgressReady={progressState.isProgressReady}
             markExplored={progressState.markExplored}
             markOwned={progressState.markOwned}
             saveScore={progressState.saveScore}
@@ -1120,6 +1203,7 @@ export default function App() {
         element={
           <TapPage
             authState={authState}
+            isProgressReady={progressState.isProgressReady}
             markExplored={progressState.markExplored}
             markOwned={progressState.markOwned}
             saveScore={progressState.saveScore}
