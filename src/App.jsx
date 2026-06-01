@@ -3,6 +3,7 @@ import { Link, NavLink, Route, Routes, useParams } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import clsx from "clsx";
 import {
+  AlertTriangle,
   ArrowLeft,
   Award,
   BookOpen,
@@ -17,6 +18,7 @@ import {
   Shield,
   Sparkles,
   Swords,
+  X,
 } from "lucide-react";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
@@ -449,6 +451,33 @@ function Layout({ children, authState }) {
 }
 
 function AuthButton({ authState }) {
+  const [isLogoutConfirmOpen, setIsLogoutConfirmOpen] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+
+  useEffect(() => {
+    if (!authState?.user) {
+      setIsLogoutConfirmOpen(false);
+    }
+  }, [authState?.user]);
+
+  useEffect(() => {
+    if (!isLogoutConfirmOpen) return undefined;
+    function closeOnEscape(event) {
+      if (event.key === "Escape") {
+        setIsLogoutConfirmOpen(false);
+      }
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [isLogoutConfirmOpen]);
+
+  const confirmLogout = async () => {
+    setIsLoggingOut(true);
+    await authState.logout();
+    setIsLoggingOut(false);
+    setIsLogoutConfirmOpen(false);
+  };
+
   if (!authState?.canLogin) {
     return (
       <span
@@ -479,9 +508,9 @@ function AuthButton({ authState }) {
           </span>
         )}
         <button
-          onClick={authState.logout}
+          onClick={() => setIsLogoutConfirmOpen(true)}
           className="inline-flex h-10 items-center gap-2 rounded-lg border border-leaf/40 bg-leaf/15 px-2.5 text-sm font-bold text-paper transition hover:bg-leaf/25 sm:px-3"
-          title="Klik untuk logout"
+          title="Buka pilihan akun"
         >
           {authState.user.photoURL ? (
             <img
@@ -498,6 +527,63 @@ function AuthButton({ authState }) {
           <span className="hidden text-paper/70 sm:inline">Keluar</span>
           <LogOut size={15} className="text-paper/70" />
         </button>
+        {isLogoutConfirmOpen && (
+          <div
+            className="fixed inset-0 z-[80] grid place-items-center bg-zinc-950/55 p-4 backdrop-blur-sm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="logout-title"
+            onClick={() => setIsLogoutConfirmOpen(false)}
+          >
+            <motion.section
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.16 }}
+              className="w-full max-w-sm rounded-lg border border-ink/10 bg-white p-4 text-ink shadow-soft"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <span className="grid h-10 w-10 place-items-center rounded-lg bg-gold/20 text-gold">
+                    <AlertTriangle size={20} />
+                  </span>
+                  <div>
+                    <h2 id="logout-title" className="font-black">
+                      Keluar dari akun?
+                    </h2>
+                    <p className="mt-1 text-sm leading-5 text-muted">
+                      Progress akun sudah tersimpan. Kamu perlu login lagi kalau mau lanjut
+                      sinkron koleksi.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIsLogoutConfirmOpen(false)}
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-ink/10 text-muted transition hover:bg-paper hover:text-ink"
+                  aria-label="Tutup konfirmasi logout"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setIsLogoutConfirmOpen(false)}
+                  className="h-11 rounded-lg border border-ink/10 bg-white px-4 text-sm font-extrabold text-muted transition hover:border-teak/30 hover:text-ink"
+                >
+                  Batal
+                </button>
+                <button
+                  onClick={confirmLogout}
+                  disabled={isLoggingOut}
+                  className="h-11 rounded-lg bg-zinc-950 px-4 text-sm font-extrabold text-white transition hover:bg-zinc-800 disabled:cursor-wait disabled:opacity-70"
+                >
+                  {isLoggingOut ? "Keluar..." : "Keluar akun"}
+                </button>
+              </div>
+            </motion.section>
+          </div>
+        )}
       </div>
     );
   }
