@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
+import { Link, NavLink, Route, Routes, useParams } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import clsx from "clsx";
 import {
@@ -169,7 +169,10 @@ function authErrorMessage(error) {
 
 function useProgressState(user) {
   const [progress, setProgress] = useState(() => readLocalProgress());
-  const userDocRef = user && db ? doc(db, "userProgress", user.uid) : null;
+  const userDocRef = useMemo(
+    () => (user && db ? doc(db, "userProgress", user.uid) : null),
+    [user]
+  );
 
   const persist = useCallback(
     async (nextProgress) => {
@@ -208,6 +211,7 @@ function useProgressState(user) {
     (updater) => {
       setProgress((current) => {
         const nextProgress = updater(current);
+        if (Object.is(nextProgress, current)) return current;
         persist(nextProgress).catch(() => {});
         return nextProgress;
       });
@@ -217,34 +221,50 @@ function useProgressState(user) {
 
   const markExplored = useCallback(
     (id) => {
-      updateProgress((current) => ({
-        ...current,
-        exploredCards: unique([...(current.exploredCards || []), id]),
-      }));
+      updateProgress((current) => {
+        if (current.exploredCards?.includes(id)) return current;
+        return {
+          ...current,
+          exploredCards: unique([...(current.exploredCards || []), id]),
+        };
+      });
     },
     [updateProgress]
   );
 
   const markOwned = useCallback(
     (id) => {
-      updateProgress((current) => ({
-        ...current,
-        ownedCards: unique([...(current.ownedCards || []), id]),
-        exploredCards: unique([...(current.exploredCards || []), id]),
-      }));
+      updateProgress((current) => {
+        const alreadyOwned = current.ownedCards?.includes(id);
+        const alreadyExplored = current.exploredCards?.includes(id);
+        if (alreadyOwned && alreadyExplored) return current;
+        return {
+          ...current,
+          ownedCards: alreadyOwned
+            ? current.ownedCards
+            : unique([...(current.ownedCards || []), id]),
+          exploredCards: alreadyExplored
+            ? current.exploredCards
+            : unique([...(current.exploredCards || []), id]),
+        };
+      });
     },
     [updateProgress]
   );
 
   const saveScore = useCallback(
     (id, score) => {
-      updateProgress((current) => ({
-        ...current,
-        quizScores: {
-          ...(current.quizScores || {}),
-          [id]: Math.max(score, current.quizScores?.[id] || 0),
-        },
-      }));
+      updateProgress((current) => {
+        const currentScore = current.quizScores?.[id] || 0;
+        if (score <= currentScore) return current;
+        return {
+          ...current,
+          quizScores: {
+            ...(current.quizScores || {}),
+            [id]: score,
+          },
+        };
+      });
     },
     [updateProgress]
   );
@@ -741,7 +761,6 @@ function InfoPanel({ title, rows }) {
 
 function DetailPage({ authState, markExplored, markOwned, saveScore, source = "web", scannedCard }) {
   const { id } = useParams();
-  const navigate = useNavigate();
   const card = scannedCard || cardById.get(id);
   const [tab, setTab] = useState("cerita");
 
@@ -754,7 +773,7 @@ function DetailPage({ authState, markExplored, markOwned, saveScore, source = "w
     }
   }, [card, markExplored, markOwned, source]);
 
-  if (!card) return <NotFound id={id} />;
+  if (!card) return <NotFound id={id} authState={authState} />;
 
   const tabs = [
     ["cerita", "Cerita"],
@@ -789,12 +808,12 @@ function DetailPage({ authState, markExplored, markOwned, saveScore, source = "w
           </aside>
 
           <article className="min-w-0">
-            <button
-              onClick={() => navigate("/")}
+            <Link
+              to="/"
               className="inline-flex h-10 items-center gap-2 rounded-lg border border-ink/10 bg-white px-3 text-sm font-bold text-muted transition hover:border-teak/30 hover:text-ink"
             >
               <ArrowLeft size={17} /> Kembali
-            </button>
+            </Link>
 
             <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
               <div>
@@ -845,6 +864,12 @@ function DetailPage({ authState, markExplored, markOwned, saveScore, source = "w
             </AnimatePresence>
           </article>
         </section>
+        <Link
+          to="/"
+          className="fixed inset-x-4 bottom-4 z-50 inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-zinc-950 px-4 text-sm font-black text-white shadow-soft md:hidden"
+        >
+          <ArrowLeft size={18} /> Kembali ke koleksi
+        </Link>
       </main>
     </Layout>
   );
