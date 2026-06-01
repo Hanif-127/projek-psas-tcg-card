@@ -395,6 +395,8 @@ function AuthButton({ authState }) {
   }
 
   if (authState.user) {
+    const firstName = authState.user.displayName?.split(" ")[0] || "Akun";
+    const initial = firstName.slice(0, 1).toUpperCase();
     return (
       <div className="flex items-center gap-2">
         {authState.authError && (
@@ -404,10 +406,22 @@ function AuthButton({ authState }) {
         )}
         <button
           onClick={authState.logout}
-          className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/15 px-3 text-sm font-bold text-paper transition hover:bg-white/10"
+          className="inline-flex h-10 items-center gap-2 rounded-lg border border-leaf/40 bg-leaf/15 px-2.5 text-sm font-bold text-paper transition hover:bg-leaf/25 sm:px-3"
+          title="Klik untuk logout"
         >
-          <LogOut size={16} />
-          <span className="hidden sm:inline">{authState.user.displayName?.split(" ")[0] || "Logout"}</span>
+          {authState.user.photoURL ? (
+            <img
+              src={authState.user.photoURL}
+              alt=""
+              className="h-6 w-6 rounded-full border border-white/25"
+            />
+          ) : (
+            <span className="grid h-6 w-6 place-items-center rounded-full bg-leaf text-xs font-black text-white">
+              {initial}
+            </span>
+          )}
+          <span className="max-w-20 truncate sm:max-w-28">{firstName}</span>
+          <LogOut size={15} className="text-paper/70" />
         </button>
       </div>
     );
@@ -425,7 +439,7 @@ function AuthButton({ authState }) {
         className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/15 px-3 text-sm font-bold text-paper transition hover:bg-white/10"
       >
         <LogIn size={16} />
-        <span className="hidden sm:inline">Login Google</span>
+        <span>Login</span>
       </button>
     </div>
   );
