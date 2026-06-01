@@ -118,27 +118,53 @@ function mergeProgress(localProgress, remoteProgress = {}) {
 
 function useAuthState() {
   const [user, setUser] = useState(null);
+  const [authError, setAuthError] = useState("");
   const [isAuthReady, setIsAuthReady] = useState(!isFirebaseConfigured);
 
   useEffect(() => {
     if (!auth) return undefined;
     return onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser);
+      setAuthError("");
       setIsAuthReady(true);
     });
   }, []);
 
   const login = useCallback(async () => {
     if (!auth || !googleProvider) return;
-    await signInWithPopup(auth, googleProvider);
+    try {
+      setAuthError("");
+      await signInWithPopup(auth, googleProvider);
+    } catch (error) {
+      setAuthError(authErrorMessage(error));
+    }
   }, []);
 
   const logout = useCallback(async () => {
     if (!auth) return;
-    await signOut(auth);
+    try {
+      setAuthError("");
+      await signOut(auth);
+    } catch (error) {
+      setAuthError(authErrorMessage(error));
+    }
   }, []);
 
-  return { user, isAuthReady, login, logout, canLogin: isFirebaseConfigured };
+  return { user, isAuthReady, authError, login, logout, canLogin: isFirebaseConfigured };
+}
+
+function authErrorMessage(error) {
+  const code = error?.code || "";
+  if (code === "auth/unauthorized-domain") {
+    return "Domain Vercel belum ditambahkan ke Firebase Authorized domains.";
+  }
+  if (code === "auth/popup-blocked") {
+    return "Popup login diblokir browser. Izinkan popup untuk situs ini.";
+  }
+  if (code === "auth/popup-closed-by-user") {
+    return "Popup login tertutup sebelum proses selesai.";
+  }
+  return error?.message || "Login Google gagal. Coba ulangi beberapa saat lagi.";
 }
 
 function useProgressState(user) {
@@ -370,24 +396,38 @@ function AuthButton({ authState }) {
 
   if (authState.user) {
     return (
-      <button
-        onClick={authState.logout}
-        className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/15 px-3 text-sm font-bold text-paper transition hover:bg-white/10"
-      >
-        <LogOut size={16} />
-        <span className="hidden sm:inline">{authState.user.displayName?.split(" ")[0] || "Logout"}</span>
-      </button>
+      <div className="flex items-center gap-2">
+        {authState.authError && (
+          <span className="hidden max-w-56 rounded-lg border border-brick/30 bg-brick/20 px-3 py-2 text-xs font-bold text-paper md:inline-flex">
+            {authState.authError}
+          </span>
+        )}
+        <button
+          onClick={authState.logout}
+          className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/15 px-3 text-sm font-bold text-paper transition hover:bg-white/10"
+        >
+          <LogOut size={16} />
+          <span className="hidden sm:inline">{authState.user.displayName?.split(" ")[0] || "Logout"}</span>
+        </button>
+      </div>
     );
   }
 
   return (
-    <button
-      onClick={authState.login}
-      className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/15 px-3 text-sm font-bold text-paper transition hover:bg-white/10"
-    >
-      <LogIn size={16} />
-      <span className="hidden sm:inline">Login Google</span>
-    </button>
+    <div className="flex items-center gap-2">
+      {authState.authError && (
+        <span className="hidden max-w-56 rounded-lg border border-brick/30 bg-brick/20 px-3 py-2 text-xs font-bold text-paper md:inline-flex">
+          {authState.authError}
+        </span>
+      )}
+      <button
+        onClick={authState.login}
+        className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/15 px-3 text-sm font-bold text-paper transition hover:bg-white/10"
+      >
+        <LogIn size={16} />
+        <span className="hidden sm:inline">Login Google</span>
+      </button>
+    </div>
   );
 }
 
@@ -584,6 +624,11 @@ function LoginPanel({ authState }) {
       ) : (
         <p className="mt-2 text-sm leading-5 text-muted">
           Login Google sudah disiapkan, tapi belum aktif sampai Firebase config dimasukkan di Vercel.
+        </p>
+      )}
+      {authState?.authError && (
+        <p className="mt-3 rounded-lg border border-brick/20 bg-brick/10 p-3 text-sm font-bold leading-5 text-brick">
+          {authState.authError}
         </p>
       )}
     </section>
